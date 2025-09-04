@@ -1,6 +1,7 @@
 package znet
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"net"
@@ -17,6 +18,11 @@ import (
 )
 
 type Client struct {
+	sync.WaitGroup
+	sync.Mutex
+	started bool
+	ctx     context.Context
+	cancel  context.CancelFunc
 	// Client Name 客户端的名称
 	Name string
 	// IP of the target server to connect 目标连接服务器的IP
@@ -39,7 +45,7 @@ type Client struct {
 	// Data packet packer 数据报文封包方式
 	packet ziface.IDataPack
 	// Asynchronous channel for capturing connection close status 异步捕获连接关闭状态
-	exitChan chan struct{}
+	// exitChan chan struct{}
 	// Message management module 消息管理模块
 	msgHandler ziface.IMsgHandle
 	// Disassembly and assembly decoder for resolving sticky and broken packages
@@ -52,7 +58,7 @@ type Client struct {
 	// For websocket connections
 	dialer *websocket.Dialer
 	// Error channel
-	ErrChan chan error
+	errChan chan error
 }
 
 func NewClient(ip string, port int, opts ...ClientOption) ziface.IClient {
@@ -68,7 +74,7 @@ func NewClient(ip string, port int, opts ...ClientOption) ziface.IClient {
 		packet:     zpack.Factory().NewPack(ziface.ZinxDataPack), // Default to using Zinx's TLV packet format(默认使用zinx的TLV封包方式)
 		decoder:    zdecoder.NewTLVDecoder(),                     // Default to using Zinx's TLV decoder(默认使用zinx的TLV解码器)
 		version:    "tcp",
-		ErrChan:    make(chan error),
+		errChan:    make(chan error, 1),
 	}
 
 	// Apply Option settings (应用Option设置)
@@ -93,7 +99,7 @@ func NewWsClient(ip string, port int, opts ...ClientOption) ziface.IClient {
 		decoder:    zdecoder.NewTLVDecoder(),                     // Default to using Zinx's TLV decoder(默认使用zinx的TLV解码器)
 		version:    "websocket",
 		dialer:     &websocket.Dialer{},
-		ErrChan:    make(chan error),
+		errChan:    make(chan error, 1),
 	}
 
 	// Apply Option settings (应用Option设置)
@@ -113,18 +119,35 @@ func NewTLSClient(ip string, port int, opts ...ClientOption) ziface.IClient {
 	return c
 }
 
+// notify error unblock
+func (c *Client) notifyErr(err error) {
+	select {
+	case c.errChan <- err:
+	default:
+	}
+}
+
 // Start starts the client, sends requests and establishes a connection.
 // (重新启动客户端，发送请求且建立连接)
 func (c *Client) Restart() {
-	c.exitChan = make(chan struct{})
+	//try to stop and wait until client stoped
+	c.Stop()
 
+	//set started flag
+	c.Lock()
+	if c.started {
+		// already started, just return
+		c.Unlock()
+		return
+	}
+	c.started = true
+	c.Unlock()
+
+	c.ctx, c.cancel = context.WithCancel(context.Background())
+	c.Add(1)
+	zlog.Ins().InfoF("[START] Zinx Client dial RemoteAddr: %s:%d\n", c.Ip, c.Port)
 	go func() {
-
-		addr := &net.TCPAddr{
-			IP:   net.ParseIP(c.Ip),
-			Port: c.Port,
-			Zone: "", //for ipv6, ignore
-		}
+		defer c.Done()
 
 		// Create a raw socket and get net.Conn (创建原始Socket，得到net.Conn)
 		var connect ziface.IConnection
@@ -136,11 +159,11 @@ func (c *Client) Restart() {
 			}
 
 			// Create a raw socket and get net.Conn (创建原始Socket，得到net.Conn)
-			wsConn, _, err := c.dialer.Dial(wsAddr, c.WsHeader)
+			wsConn, _, err := c.dialer.DialContext(c.ctx, wsAddr, c.WsHeader)
 			if err != nil {
 				// connection failed
 				zlog.Ins().ErrorF("WsClient connect to server failed, err:%v", err)
-				c.ErrChan <- err
+				c.notifyErr(err)
 				return
 			}
 			// Create Connection object
@@ -156,19 +179,24 @@ func (c *Client) Restart() {
 					// (这里是跳过证书验证，因为证书签发机构的CA证书是不被认证的)
 					InsecureSkipVerify: true,
 				}
-
-				conn, err = tls.Dial("tcp", fmt.Sprintf("%v:%v", net.ParseIP(c.Ip), c.Port), config)
+				d := &tls.Dialer{
+					Config: config,
+				}
+				//conn, err = tls.Dial("tcp", fmt.Sprintf("%v:%v", net.ParseIP(c.Ip), c.Port), config)
+				conn, err = d.DialContext(c.ctx, "tcp", fmt.Sprintf("%v:%v", net.ParseIP(c.Ip), c.Port))
 				if err != nil {
 					zlog.Ins().ErrorF("tls client connect to server failed, err:%v", err)
-					c.ErrChan <- err
+					c.notifyErr(err)
 					return
 				}
 			} else {
-				conn, err = net.DialTCP("tcp", nil, addr)
+				//conn, err = net.DialTCP("tcp", nil, addr)
+				d := &net.Dialer{}
+				conn, err = d.DialContext(c.ctx, "tcp", fmt.Sprintf("%v:%v", net.ParseIP(c.Ip), c.Port))
 				if err != nil {
 					// connection failed
 					zlog.Ins().ErrorF("client connect to server failed, err:%v", err)
-					c.ErrChan <- err
+					c.notifyErr(err)
 					return
 				}
 			}
@@ -190,10 +218,8 @@ func (c *Client) Restart() {
 		// Start connection
 		go connect.Start()
 
-		select {
-		case <-c.exitChan:
-			zlog.Ins().InfoF("client exit.")
-		}
+		<-c.ctx.Done()
+		zlog.Ins().InfoF("client exit.")
 	}()
 }
 
@@ -246,15 +272,28 @@ func (c *Client) StartHeartBeatWithOption(interval time.Duration, option *ziface
 	c.hc = checker
 }
 
+// 保证重复调用Stop不会导致panic
 func (c *Client) Stop() {
+	c.Lock()
+	defer c.Unlock()
+	if !c.started {
+		return
+	}
+	c.started = false
+
 	con := c.Conn()
 	if con != nil {
 		zlog.Ins().InfoF("[STOP] Zinx Client LocalAddr: %s, RemoteAddr: %s\n", con.LocalAddr(), con.RemoteAddr())
 		con.Stop()
 	}
-	c.exitChan <- struct{}{}
-	close(c.exitChan)
-	close(c.ErrChan)
+
+	// c.exitChan <- struct{}{}
+	// close(c.exitChan)
+	// close(c.ErrChan)
+	if c.cancel != nil {
+		c.cancel()
+	}
+	c.Wait()
 }
 
 func (c *Client) AddRouter(msgID uint32, router ziface.IRouter) {
@@ -316,7 +355,7 @@ func (c *Client) GetLengthField() *ziface.LengthField {
 }
 
 func (c *Client) GetErrChan() chan error {
-	return c.ErrChan
+	return c.errChan
 }
 
 func (c *Client) SetName(name string) {

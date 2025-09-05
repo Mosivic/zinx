@@ -61,7 +61,7 @@ type IClient interface {
 	AddInterceptor(IInterceptor)
 
 	// Get the error channel for this Client 获取客户端错误管道
-	GetErrChan() chan error
+	GetErrChan() <-chan error
 
 	// Set the name of this Clien
 	// 设置客户端Client名称

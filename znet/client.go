@@ -354,7 +354,7 @@ func (c *Client) GetLengthField() *ziface.LengthField {
 	return nil
 }
 
-func (c *Client) GetErrChan() chan error {
+func (c *Client) GetErrChan() <-chan error {
 	return c.errChan
 }
 

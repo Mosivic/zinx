@@ -141,10 +141,10 @@ func (c *Client) Restart() {
 		return
 	}
 	c.started = true
-	c.Unlock()
-
 	c.ctx, c.cancel = context.WithCancel(context.Background())
 	c.Add(1)
+	c.Unlock()
+
 	zlog.Ins().InfoF("[START] Zinx Client dial RemoteAddr: %s:%d\n", c.Ip, c.Port)
 	go func() {
 		defer c.Done()

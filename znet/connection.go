@@ -20,6 +20,10 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// CallBackFunc defines the callback function type
+// (定义回调函数类型)
+type CallBackFunc func()
+
 // Connection TCP connection module
 // Used to handle the read and write business of TCP connections, one Connection corresponds to one connection
 // (用于处理Tcp连接的读写业务 一个连接对应一个Connection)

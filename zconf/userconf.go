@@ -64,6 +64,15 @@ func UserConfToGlobal(config *Config) {
 		GlobalObject.LogFile = config.LogFile
 		zlog.SetLogFile(GlobalObject.LogDir, GlobalObject.LogFile)
 	}
+	if config.LogSaveDays > 0 {
+		GlobalObject.LogSaveDays = config.LogSaveDays
+	}
+	if config.LogFileSize > 0 {
+		GlobalObject.LogFileSize = config.LogFileSize
+	}
+	if config.LogCons {
+		GlobalObject.LogCons = config.LogCons
+	}
 
 	// Keepalive
 	if config.HeartbeatMax != 0 {
